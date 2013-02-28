@@ -1,0 +1,8 @@
+*.o
+cannedbgp
+*.csv
+*.ods
+*.gnuplot
+*.png
+*.jpg
+*.jpeg
