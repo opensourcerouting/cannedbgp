@@ -1,0 +1,17 @@
+The following sequence of commands may be suitable to build cannedbgp:
+
+  Install required dependencies (there are probably some missing):
+    $ sudo apt-get install git-core mercurial pkg-config libevent-dev libbz2-dev zlib1g-dev
+
+  Download and build libbgpdump:
+    $ hg clone https://bitbucket.org/ripencc/bgpdump
+    $ cd bgpdump
+    $ autoreconf -fis
+    $ ./configure
+    $ make
+    $ cd ..
+
+  Download and build cannedbgp:
+    $ git clone https://github.com/opensourcerouting/cannedbgp.git
+    $ cd cannedbgp
+    $ make
