@@ -181,7 +181,6 @@ static void peer_ev_write(struct bufferevent *bev, void *ctx)
 	 * than IPv4 as we have to do the aggreation in the MP-BGP attribute.
 	 */
 	if (p->sendpos->afi == AFI_IP) {
-		fprintf(stderr, "afi is ipv4, adding nlri\n");
 		while (p->sendpos && p->sendpos->attrlen == u->attrlen && !memcmp(p->sendpos->attr, u->attr, u->attrlen)) {
 			if (p->sendpos->afi != AFI_IP)
 			  break;
