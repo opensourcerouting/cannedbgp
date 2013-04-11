@@ -1,5 +1,6 @@
 /*
  Copyright (c) 2013  David Lamparter / Internet Systems Consortium, Inc.
+ Copyright (c) 2013  Christian Franke / Internet Systems Consortium, Inc.
 
  Permission to use, copy, modify, and distribute this software and its
  documentation for any purpose and without fee is hereby granted, provided
@@ -55,6 +56,13 @@ static struct timespec start_ts;
 
 FILE *plotfile = NULL;
 
+union sockaddr_container {
+		struct sockaddr_storage stor;
+		struct sockaddr sa;
+		struct sockaddr_in in;
+		struct sockaddr_in6 in6;
+};
+
 struct update {
 	struct update *next;
 
@@ -73,12 +81,7 @@ struct update {
 struct peer {
 	struct peer *next;
 
-	union {
-		struct sockaddr_storage stor;
-		struct sockaddr sa;
-		struct sockaddr_in in;
-		struct sockaddr_in6 in6;
-	} bind;
+	union sockaddr_container bind;
 	struct in_addr dump_router_id;
 	size_t dump_index;
 	uint32_t asn;
@@ -173,16 +176,28 @@ static void peer_ev_write(struct bufferevent *bev, void *ctx)
 	evbuffer_add(out, &attrsize, sizeof(attrsize));
 	evbuffer_add(out, u->attr, u->attrlen);
 
-	while (p->sendpos && p->sendpos->attrlen == u->attrlen && !memcmp(p->sendpos->attr, u->attr, u->attrlen)) {
-		prefixbytes = (p->sendpos->prefixlen + 7) / 8;
-		evbuffer_add(out, &p->sendpos->prefixlen, sizeof(p->sendpos->prefixlen));
-		evbuffer_add(out, &p->sendpos->prefix, prefixbytes);
+	/* XXX: This could probably be optimized, the current implementation
+	 * doesn't aggreagate IPv6 at all. However this is a bit more tricky
+	 * than IPv4 as we have to do the aggreation in the MP-BGP attribute.
+	 */
+	if (p->sendpos->afi == AFI_IP) {
+		fprintf(stderr, "afi is ipv4, adding nlri\n");
+		while (p->sendpos && p->sendpos->attrlen == u->attrlen && !memcmp(p->sendpos->attr, u->attr, u->attrlen)) {
+			if (p->sendpos->afi != AFI_IP)
+			  break;
+			prefixbytes = (p->sendpos->prefixlen + 7) / 8;
+			evbuffer_add(out, &p->sendpos->prefixlen, sizeof(p->sendpos->prefixlen));
+			evbuffer_add(out, &p->sendpos->prefix, prefixbytes);
 
+			p->sent_total++;
+			p->sent_aggr++;
+			p->sendpos = p->sendpos->next;
+		}
+		p->sent_aggr--;
+	} else {
 		p->sent_total++;
-		p->sent_aggr++;
 		p->sendpos = p->sendpos->next;
 	}
-	p->sent_aggr--;
 
 	peer_put_message(bev, out);
 	evbuffer_free(out);
@@ -218,6 +233,8 @@ static void peer_send_open(struct peer *p)
 	uint8_t optional[] = {
 		/* MP-BGP IPv4 */
 		2, 6, 1, 4, 0, 1, 0, 1,
+		/* MP-BGP IPv6 Unicast */
+		2, 6, 1, 4, 0, 2, 0, 1,
 		/* AS4 */
 		2, 6, 0x41, 4, p->asn >> 24, p->asn >> 16, p->asn >> 8, p->asn
 	};
@@ -354,8 +371,9 @@ static void load_entry(BGPDUMP_ENTRY *e)
 		fprintf(stderr, "unknown entry type %d\n", e->type);
 		return;
 	}
-	if (ee->afi != AFI_IP)
+	if (ee->afi != AFI_IP && ee->afi != AFI_IP6)
 		return;
+
 	for (i = 0; i < ee->entry_count; i++) {
 		BGPDUMP_TABLE_DUMP_V2_ROUTE_ENTRY *re = &ee->entries[i];
 		p = peersbyidx[re->peer_index];
@@ -368,6 +386,9 @@ static void load_entry(BGPDUMP_ENTRY *e)
 			p->updates_failed++;
 			continue;
 		}
+
+		/* XXX: Mandatory attribute, but what's the actual
+		 * content on MP-BGP with only IPv6 ? */
 		if (!re->attr->nexthop.s_addr) {
 			fprintf(stderr, "empty nexthop\n");
 			p->updates_failed++;
@@ -403,7 +424,7 @@ int main(int argc, char **argv)
 	struct event *evt_info, *evt_keepalive;
 	struct timeval tv;
 
-	struct sockaddr_in dst;
+	union sockaddr_container dst;
 
 	do {
 		optch = getopt(argc, argv, "i:d:G:");
@@ -434,12 +455,16 @@ int main(int argc, char **argv)
 		fprintf(stderr, "specify destination host with -d\n");
 		return 1;
 	}
-	if (inet_pton(AF_INET, dhost, &dst.sin_addr) != 1) {
+	if (inet_pton(AF_INET, dhost, &dst.in.sin_addr) == 1) {
+		dst.in.sin_family = AF_INET;
+		dst.in.sin_port = htons(179);
+	} else if (inet_pton(AF_INET6, dhost, &dst.in6.sin6_addr) == 1) {
+		dst.in6.sin6_family = AF_INET6;
+		dst.in6.sin6_port = htons(179);
+	} else {
 		fprintf(stderr, "invalid destination host %s\n", dhost);
 		return 1;
 	}
-	dst.sin_family = AF_INET;
-	dst.sin_port = htons(179);
 
 	BGPDUMP *my_dump = bgpdump_open_dump(inpfile);
 	if (!my_dump) {
@@ -493,15 +518,26 @@ int main(int argc, char **argv)
 			if (p->dump_router_id.s_addr == table_dump_v2_peer_index_table->entries[i].peer_bgp_id.s_addr)
 				break;
 #endif
-		socklen = sizeof(struct sockaddr_in);
-
 		i = atoi(argv[optind]);
 
 		if (i >= table_dump_v2_peer_index_table->peer_count) {
 			fprintf(stderr, "cannot find peer %s in dump\n", argv[optind]);
 		} else {
-			p->bind.in.sin_family = AF_INET;
-			p->bind.in.sin_addr = table_dump_v2_peer_index_table->entries[i].peer_ip.v4_addr;
+			if (table_dump_v2_peer_index_table->entries[i].afi == AFI_IP) {
+				p->bind.in.sin_family = AF_INET;
+				p->bind.in.sin_addr = table_dump_v2_peer_index_table->entries[i].peer_ip.v4_addr;
+				socklen = sizeof(struct sockaddr_in);
+			} else if (table_dump_v2_peer_index_table->entries[i].afi == AFI_IP6) {
+				p->bind.in6.sin6_family = AF_INET6;
+				p->bind.in6.sin6_addr = table_dump_v2_peer_index_table->entries[i].peer_ip.v6_addr;
+				socklen = sizeof(struct sockaddr_in6);
+			} else {
+				fprintf(stderr, "Peer %d has unsupported afi 0x%x\n", i,
+					table_dump_v2_peer_index_table->entries[i].afi);
+				free(p);
+				continue;
+			}
+
 			p->dump_router_id = table_dump_v2_peer_index_table->entries[i].peer_bgp_id;
 			if (!p->dump_router_id.s_addr) {
 				fprintf(stderr, "skipping peer %d due to zero router-id\n", i);
@@ -574,7 +610,8 @@ int main(int argc, char **argv)
 		printf("- %lu loaded (%lu kB), %lu errors\n",
 			p->updates_total, (p->mem + 1023) / 1024, p->updates_failed);
 
-		if (connect(p->fd, (struct sockaddr *)&dst, sizeof(dst))) {
+		if (connect(p->fd, (struct sockaddr *)&dst,
+				(dst.sa.sa_family == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6))) {
 			fprintf(stderr, "failed to connect: %s\n", strerror(errno));
 			return 1;
 		}
