@@ -154,34 +154,43 @@ static void peer_put_message(struct bufferevent *bev, struct evbuffer *buf)
 	bufferevent_write_buffer(bev, buf);
 }
 
+static struct update *peer_next_sendpos(struct peer *p)
+{
+	return p->sendpos->next;
+}
+
 static void peer_ev_write(struct bufferevent *bev, void *ctx)
 {
 	struct peer *p = ctx;
 	struct evbuffer *out = evbuffer_new();
-	struct update *u = p->sendpos;
 
 	uint8_t prefixbytes;
 	uint8_t type = 2;
 	uint16_t withdrawsize = 0;
 	uint16_t attrsize;
 
-	if (!u) {
+	if (!p->sendpos) {
 		bufferevent_disable(p->bev, EV_WRITE);
 		return;
 	}
 
 	evbuffer_add(out, &type, sizeof(type));
 	evbuffer_add(out, &withdrawsize, sizeof(withdrawsize));
-	attrsize = htons(u->attrlen);
+	attrsize = htons(p->sendpos->attrlen);
 	evbuffer_add(out, &attrsize, sizeof(attrsize));
-	evbuffer_add(out, u->attr, u->attrlen);
+	evbuffer_add(out, p->sendpos->attr, p->sendpos->attrlen);
+
+	attrsize = p->sendpos->attrlen;
+	uint8_t *attrbuf = malloc(attrsize);
+	memcpy(attrbuf, p->sendpos->attr, attrsize);
 
 	/* XXX: This could probably be optimized, the current implementation
 	 * doesn't aggreagate IPv6 at all. However this is a bit more tricky
 	 * than IPv4 as we have to do the aggreation in the MP-BGP attribute.
 	 */
 	if (p->sendpos->afi == AFI_IP) {
-		while (p->sendpos && p->sendpos->attrlen == u->attrlen && !memcmp(p->sendpos->attr, u->attr, u->attrlen)) {
+		while (p->sendpos && p->sendpos->attrlen == attrsize
+		       && !memcmp(p->sendpos->attr, attrbuf, attrsize)) {
 			if (p->sendpos->afi != AFI_IP)
 			  break;
 			prefixbytes = (p->sendpos->prefixlen + 7) / 8;
@@ -190,7 +199,7 @@ static void peer_ev_write(struct bufferevent *bev, void *ctx)
 
 			p->sent_total++;
 			p->sent_aggr++;
-			p->sendpos = p->sendpos->next;
+			p->sendpos = peer_next_sendpos(p);
 		}
 		p->sent_aggr--;
 	} else {
@@ -198,6 +207,7 @@ static void peer_ev_write(struct bufferevent *bev, void *ctx)
 		p->sendpos = p->sendpos->next;
 	}
 
+	free(attrbuf);
 	peer_put_message(bev, out);
 	evbuffer_free(out);
 
