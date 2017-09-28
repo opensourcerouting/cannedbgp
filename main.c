@@ -49,8 +49,6 @@
 
 #include <bgpdump_lib.h>
 
-extern BGPDUMP_TABLE_DUMP_V2_PEER_INDEX_TABLE *table_dump_v2_peer_index_table;
-
 struct event_base *ev_base;
 static struct timespec start_ts;
 
@@ -482,13 +480,13 @@ int main(int argc, char **argv)
 	}
 	do {
 		bgpdump_read_next(my_dump);
-	} while (!table_dump_v2_peer_index_table);
-	if (!table_dump_v2_peer_index_table) {
+	} while (!my_dump->table_dump_v2_peer_index_table);
+	if (!my_dump->table_dump_v2_peer_index_table) {
 		fprintf(stderr, "failed to grab peer table from %s\n", inpfile);
 		return 1;
 	}
-	peersbyidx = calloc(sizeof(struct peer *), table_dump_v2_peer_index_table->peer_count);
-	printf("dump %s contains %d peers\n", inpfile, table_dump_v2_peer_index_table->peer_count);
+	peersbyidx = calloc(sizeof(struct peer *), my_dump->table_dump_v2_peer_index_table->peer_count);
+	printf("dump %s contains %d peers\n", inpfile, my_dump->table_dump_v2_peer_index_table->peer_count);
 
 	for (; optind < argc; optind++) {
 		socklen_t socklen;
@@ -529,25 +527,25 @@ int main(int argc, char **argv)
 #endif
 		i = atoi(argv[optind]);
 
-		if (i >= table_dump_v2_peer_index_table->peer_count) {
+		if (i >= my_dump->table_dump_v2_peer_index_table->peer_count) {
 			fprintf(stderr, "cannot find peer %s in dump\n", argv[optind]);
 		} else {
-			if (table_dump_v2_peer_index_table->entries[i].afi == AFI_IP) {
+			if (my_dump->table_dump_v2_peer_index_table->entries[i].afi == AFI_IP) {
 				p->bind.in.sin_family = AF_INET;
-				p->bind.in.sin_addr = table_dump_v2_peer_index_table->entries[i].peer_ip.v4_addr;
+				p->bind.in.sin_addr = my_dump->table_dump_v2_peer_index_table->entries[i].peer_ip.v4_addr;
 				socklen = sizeof(struct sockaddr_in);
-			} else if (table_dump_v2_peer_index_table->entries[i].afi == AFI_IP6) {
+			} else if (my_dump->table_dump_v2_peer_index_table->entries[i].afi == AFI_IP6) {
 				p->bind.in6.sin6_family = AF_INET6;
-				p->bind.in6.sin6_addr = table_dump_v2_peer_index_table->entries[i].peer_ip.v6_addr;
+				p->bind.in6.sin6_addr = my_dump->table_dump_v2_peer_index_table->entries[i].peer_ip.v6_addr;
 				socklen = sizeof(struct sockaddr_in6);
 			} else {
 				fprintf(stderr, "Peer %d has unsupported afi 0x%x\n", i,
-					table_dump_v2_peer_index_table->entries[i].afi);
+					my_dump->table_dump_v2_peer_index_table->entries[i].afi);
 				free(p);
 				continue;
 			}
 
-			p->dump_router_id = table_dump_v2_peer_index_table->entries[i].peer_bgp_id;
+			p->dump_router_id = my_dump->table_dump_v2_peer_index_table->entries[i].peer_bgp_id;
 			if (!p->dump_router_id.s_addr) {
 				fprintf(stderr, "skipping peer %d due to zero router-id\n", i);
 				free(p);
@@ -555,7 +553,7 @@ int main(int argc, char **argv)
 			}
 
 			p->dump_index = i;
-			p->asn = table_dump_v2_peer_index_table->entries[i].peer_as;
+			p->asn = my_dump->table_dump_v2_peer_index_table->entries[i].peer_as;
 			peersbyidx[p->dump_index] = p;
 
 			p->fd = socket(p->bind.sa.sa_family, SOCK_STREAM, 0);
@@ -573,8 +571,8 @@ int main(int argc, char **argv)
 		ppeers = &((*ppeers = p)->next);
 	}
 
-	for (i = 0; i < table_dump_v2_peer_index_table->peer_count; i++) {
-		BGPDUMP_TABLE_DUMP_V2_PEER_INDEX_TABLE_ENTRY *pe = &table_dump_v2_peer_index_table->entries[i];
+	for (i = 0; i < my_dump->table_dump_v2_peer_index_table->peer_count; i++) {
+		BGPDUMP_TABLE_DUMP_V2_PEER_INDEX_TABLE_ENTRY *pe = &my_dump->table_dump_v2_peer_index_table->entries[i];
 		char rid[50], addr[50];
 		inet_ntop(AF_INET, &pe->peer_bgp_id, rid, sizeof(rid));
 		inet_ntop(pe->afi == AFI_IP ? AF_INET : AF_INET6, &pe->peer_ip, addr, sizeof(addr));
