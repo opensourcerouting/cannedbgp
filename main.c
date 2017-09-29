@@ -159,9 +159,47 @@ static void peer_put_message(struct bufferevent *bev, struct evbuffer *buf)
 	bufferevent_write_buffer(bev, buf);
 }
 
+#define AFI_IP 1
+#define AFI_IP6 2
+
+static struct update *peer_synth_update(struct peer *p)
+{
+	struct update *u = calloc(sizeof(*u),1);
+
+	u->afi = (p->adv_base.in.sin_family == AF_INET) ? AFI_IP : AFI_IP6;
+	u->prefixlen = p->adv_plen;
+
+	if (u->afi == AFI_IP) {
+		memcpy(&u->prefix.in, &p->adv_base.in.sin_addr, sizeof(u->prefix.in));
+	} else {
+		memcpy(&u->prefix.in6, &p->adv_base.in6.sin6_addr, sizeof(u->prefix.in6));
+	}
+
+	/* TODO: Add nexthop and as path and possibly more as attributes */
+
+	return u;
+}
+
+static struct update *peer_first_sendpos(struct peer *p)
+{
+	if (!p->adv_count)
+		return p->updates; /* MRT peer */
+
+	return peer_synth_update(p);
+}
+
+static struct update *peer_synth_update_iter(struct peer *p)
+{
+	/* TODO: implement step */
+	return p->sendpos;
+}
+
 static struct update *peer_next_sendpos(struct peer *p)
 {
-	return p->sendpos->next;
+	if (!p->adv_count)
+		return p->sendpos->next; /* MRT peer */
+
+	return peer_synth_update_iter(p);
 }
 
 static void peer_ev_write(struct bufferevent *bev, void *ctx)
@@ -709,7 +747,7 @@ int main(int argc, char **argv)
 			fprintf(stderr, "failed to connect: %s\n", strerror(errno));
 			return 1;
 		}
-		p->sendpos = p->updates;
+		p->sendpos = peer_first_sendpos(p);
 		p->bev = bufferevent_socket_new(ev_base, p->fd, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);
 		bufferevent_setcb(p->bev, peer_ev_read, peer_ev_write, peer_ev_other, p);
 		bufferevent_setwatermark(p->bev, EV_READ, 1, 8192);
