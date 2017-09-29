@@ -76,6 +76,8 @@ struct update {
 	uint8_t *attr;
 };
 
+size_t peer_index;
+
 struct peer {
 	struct peer *next;
 
@@ -421,59 +423,13 @@ static void load_entry(BGPDUMP_ENTRY *e)
 	}
 }
 
-int main(int argc, char **argv)
+static int cannedbgp_load_dump(const char *inpfile, int optind, int argc, char *argv[])
 {
-	int optch = 0;
-	const char *inpfile = NULL, *dhost = NULL;
+	BGPDUMP *my_dump = bgpdump_open_dump(inpfile);
 	struct itimerval itv;
 	size_t i;
 	struct peer *p;
-	struct event *evt_info, *evt_keepalive;
-	struct timeval tv;
 
-	union sockaddr_container dst;
-
-	do {
-		optch = getopt(argc, argv, "i:d:G:");
-		switch (optch) {
-		case 'i':
-			inpfile = optarg;
-			break;
-		case 'd':
-			dhost = optarg;
-			break;
-		case 'G':
-			plotfile = fopen(optarg, "w");
-			if (!plotfile) {
-				fprintf(stderr, "failed to open plot file %s: %s\n", optarg, strerror(errno));
-				return 1;
-			}
-			break;
-		case -1:
-			break;
-		}
-	} while (optch != -1);
-
-	if (!inpfile) {
-		fprintf(stderr, "specify input file with -i\n");
-		return 1;
-	}
-	if (!dhost) {
-		fprintf(stderr, "specify destination host with -d\n");
-		return 1;
-	}
-	if (inet_pton(AF_INET, dhost, &dst.in.sin_addr) == 1) {
-		dst.in.sin_family = AF_INET;
-		dst.in.sin_port = htons(179);
-	} else if (inet_pton(AF_INET6, dhost, &dst.in6.sin6_addr) == 1) {
-		dst.in6.sin6_family = AF_INET6;
-		dst.in6.sin6_port = htons(179);
-	} else {
-		fprintf(stderr, "invalid destination host %s\n", dhost);
-		return 1;
-	}
-
-	BGPDUMP *my_dump = bgpdump_open_dump(inpfile);
 	if (!my_dump) {
 		fprintf(stderr, "failed to open %s\n", inpfile);
 		return 1;
@@ -490,41 +446,7 @@ int main(int argc, char **argv)
 
 	for (; optind < argc; optind++) {
 		socklen_t socklen;
-#if 0
-		char *id = strdup(argv[optind]), *bindstr;
-
-		bindstr = strchr(id, '=');
-		if (!bindstr) {
-			fprintf(stderr, "invalid peerspec: %s\n", argv[optind]);
-			return 1;
-		}
-		*bindstr++ = '\0';
-#endif
 		p = calloc(sizeof(struct peer), 1);
-#if 0
-		if (strchr(bindstr, ':')) {
-			p->bind.in6.sin6_family = AF_INET6;
-			if (inet_pton(AF_INET6, bindstr, &p->bind.in6.sin6_addr) != 1) {
-				fprintf(stderr, "invalid peerspec addr: %s\n", argv[optind]);
-				return 1;
-			}
-			socklen = sizeof(struct sockaddr_in6);
-		} else {
-			p->bind.in.sin_family = AF_INET;
-			if (inet_pton(AF_INET, bindstr, &p->bind.in.sin_addr) != 1) {
-				fprintf(stderr, "invalid peerspec addr: %s\n", argv[optind]);
-				return 1;
-			}
-			socklen = sizeof(struct sockaddr_in);
-		}
-		if (inet_pton(AF_INET, id, &p->dump_router_id) != 1) {
-			fprintf(stderr, "invalid peerspec routerid: %s\n", argv[optind]);
-			return 1;
-		}
-		for (i = 0; i < table_dump_v2_peer_index_table->peer_count; i++) {
-			if (p->dump_router_id.s_addr == table_dump_v2_peer_index_table->entries[i].peer_bgp_id.s_addr)
-				break;
-#endif
 		i = atoi(argv[optind]);
 
 		if (i >= my_dump->table_dump_v2_peer_index_table->peer_count) {
@@ -609,10 +531,106 @@ int main(int argc, char **argv)
 	printf("\n");
 
 	bgpdump_close_dump(my_dump);
+	return 0;
+}
+
+static int cannedbgp_add_synth_peer(const char *peerspec)
+{
+	char *ps = strdup(peerspec);
+	p = calloc(sizeof(struct peer), 1);
+	
+	char *addr = strtok(ps, ",");
+	char *as = strtok(NULL, ",");
+	char *adv_base = strtok(NULL, ",");
+	char *adv_step = strtok(NULL, ",");
+	char *adv_count = strtok(NULL, ",");
+
+	if (!addr) {
+		fprintf(stderr, "addr missing in peerspec\n");
+		return 1;
+	}
+
+	if (inet_pton(AF_INET, addr, &p->bind.in.sin_addr) == 1) {
+		p->bind.in.sin_family = AF_INET;
+	} else if (inet_pton(AF_INET6, addr, &p->bind.in6.sin6_addr) == 1) {
+		p->bind.in.sin6_family = AF_INET6;
+	} else {
+		fprintf(stderr, "Could not parse peerspec addr\n");
+		return 1;
+	}
+
+	peer_index++;
+
+	p->dump_index = peer_index;
+	p->dump_router_id = p->bind.in.sin_addr; /* FIXME: Quirky for v6 */
+	
+	p->
+}
+
+int main(int argc, char **argv)
+{
+	int optch = 0;
+	const char *inpfile = NULL, *dhost = NULL;
+	struct event *evt_info, *evt_keepalive;
+	struct timeval tv;
+	int rv;
+
+	union sockaddr_container dst;
+
+	do {
+		optch = getopt(argc, argv, "i:d:G:s:");
+		switch (optch) {
+		case 'i':
+			inpfile = optarg;
+			break;
+		case 'd':
+			dhost = optarg;
+			break;
+		case 'G':
+			plotfile = fopen(optarg, "w");
+			if (!plotfile) {
+				fprintf(stderr, "failed to open plot file %s: %s\n", optarg, strerror(errno));
+				return 1;
+			}
+			break;
+		case 's':
+			rv = cannedbgp_add_synth_peer(optarg);
+			if (rv)
+				return rv;
+			break;
+		case -1:
+			break;
+		}
+	} while (optch != -1);
+
+	if (!inpfile) {
+		fprintf(stderr, "specify input file with -i\n");
+		return 1;
+	}
+	if (!dhost) {
+		fprintf(stderr, "specify destination host with -d\n");
+		return 1;
+	}
+	if (inet_pton(AF_INET, dhost, &dst.in.sin_addr) == 1) {
+		dst.in.sin_family = AF_INET;
+		dst.in.sin_port = htons(179);
+	} else if (inet_pton(AF_INET6, dhost, &dst.in6.sin6_addr) == 1) {
+		dst.in6.sin6_family = AF_INET6;
+		dst.in6.sin6_port = htons(179);
+	} else {
+		fprintf(stderr, "invalid destination host %s\n", dhost);
+		return 1;
+	}
+
+	if (inpfile) {
+		rv = cannedbgp_load_dump(inpfile, optind, argc, argv);
+		if (rv)
+			return rv;
+	}
 
 	ev_base = event_base_new();
 
-	for (p = peers; p; p = p->next) {
+	for (struct peer *p = peers; p; p = p->next) {
 		peer_prefix(stdout, p);
 		printf("- %lu loaded (%lu kB), %lu errors\n",
 			p->updates_total, (p->mem + 1023) / 1024, p->updates_failed);
