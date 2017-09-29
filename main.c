@@ -96,6 +96,11 @@ struct peer {
 
 	int fd;
 	struct bufferevent *bev;
+
+	union sockaddr_container adv_base;
+	unsigned int adv_plen;
+	union sockaddr_container adv_step;
+	size_t adv_count;
 };
 
 static struct peer *peers = NULL, **ppeers = &peers;
@@ -423,6 +428,23 @@ static void load_entry(BGPDUMP_ENTRY *e)
 	}
 }
 
+static int peer_connect(struct peer *p)
+{
+	socklen_t socklen = (p->bind.in.sin_family == AF_INET) ? sizeof(struct sockaddr_in)
+							       : sizeof(struct sockaddr_in6);
+	p->fd = socket(p->bind.sa.sa_family, SOCK_STREAM, 0);
+	if (p->fd == -1) {
+		fprintf(stderr, "failed to open socket for peer\n");
+		return 1;
+	}
+	if (bind(p->fd, &p->bind.sa, socklen)) {
+		fprintf(stderr, "failed to bind socket for peer: %s\n", strerror(errno));
+		return 1;
+	}
+	getsockname(p->fd, &p->bind.sa, &socklen);
+	return 0;
+}
+
 static int cannedbgp_load_dump(const char *inpfile, int optind, int argc, char *argv[])
 {
 	BGPDUMP *my_dump = bgpdump_open_dump(inpfile);
@@ -445,7 +467,6 @@ static int cannedbgp_load_dump(const char *inpfile, int optind, int argc, char *
 	printf("dump %s contains %d peers\n", inpfile, my_dump->table_dump_v2_peer_index_table->peer_count);
 
 	for (; optind < argc; optind++) {
-		socklen_t socklen;
 		p = calloc(sizeof(struct peer), 1);
 		i = atoi(argv[optind]);
 
@@ -455,11 +476,9 @@ static int cannedbgp_load_dump(const char *inpfile, int optind, int argc, char *
 			if (my_dump->table_dump_v2_peer_index_table->entries[i].afi == AFI_IP) {
 				p->bind.in.sin_family = AF_INET;
 				p->bind.in.sin_addr = my_dump->table_dump_v2_peer_index_table->entries[i].peer_ip.v4_addr;
-				socklen = sizeof(struct sockaddr_in);
 			} else if (my_dump->table_dump_v2_peer_index_table->entries[i].afi == AFI_IP6) {
 				p->bind.in6.sin6_family = AF_INET6;
 				p->bind.in6.sin6_addr = my_dump->table_dump_v2_peer_index_table->entries[i].peer_ip.v6_addr;
-				socklen = sizeof(struct sockaddr_in6);
 			} else {
 				fprintf(stderr, "Peer %d has unsupported afi 0x%x\n", i,
 					my_dump->table_dump_v2_peer_index_table->entries[i].afi);
@@ -478,16 +497,9 @@ static int cannedbgp_load_dump(const char *inpfile, int optind, int argc, char *
 			p->asn = my_dump->table_dump_v2_peer_index_table->entries[i].peer_as;
 			peersbyidx[p->dump_index] = p;
 
-			p->fd = socket(p->bind.sa.sa_family, SOCK_STREAM, 0);
-			if (p->fd == -1) {
-				fprintf(stderr, "failed to open socket for peer\n");
-				return 1;
-			}
-			if (bind(p->fd, &p->bind.sa, socklen)) {
-				fprintf(stderr, "failed to bind socket for peer: %s\n", strerror(errno));
-				return 1;
-			}
-			getsockname(p->fd, &p->bind.sa, &socklen);
+			int rv = peer_connect(p);
+			if (rv)
+				return rv;
 		}
 		p->pupdates = &p->updates;
 		ppeers = &((*ppeers = p)->next);
@@ -537,11 +549,12 @@ static int cannedbgp_load_dump(const char *inpfile, int optind, int argc, char *
 static int cannedbgp_add_synth_peer(const char *peerspec)
 {
 	char *ps = strdup(peerspec);
-	p = calloc(sizeof(struct peer), 1);
+	struct peer *p = calloc(sizeof(struct peer), 1);
 	
 	char *addr = strtok(ps, ",");
 	char *as = strtok(NULL, ",");
 	char *adv_base = strtok(NULL, ",");
+	char *adv_plen = strtok(NULL, ",");
 	char *adv_step = strtok(NULL, ",");
 	char *adv_count = strtok(NULL, ",");
 
@@ -553,7 +566,7 @@ static int cannedbgp_add_synth_peer(const char *peerspec)
 	if (inet_pton(AF_INET, addr, &p->bind.in.sin_addr) == 1) {
 		p->bind.in.sin_family = AF_INET;
 	} else if (inet_pton(AF_INET6, addr, &p->bind.in6.sin6_addr) == 1) {
-		p->bind.in.sin6_family = AF_INET6;
+		p->bind.in6.sin6_family = AF_INET6;
 	} else {
 		fprintf(stderr, "Could not parse peerspec addr\n");
 		return 1;
@@ -563,8 +576,64 @@ static int cannedbgp_add_synth_peer(const char *peerspec)
 
 	p->dump_index = peer_index;
 	p->dump_router_id = p->bind.in.sin_addr; /* FIXME: Quirky for v6 */
-	
-	p->
+	if (!p->dump_router_id.s_addr)
+		p->dump_router_id.s_addr = htonl(peer_index);
+
+	if (!as) {
+		fprintf(stderr, "as missing in peerspec\n");
+		return 1;
+	}
+	p->asn = strtoul(as, NULL, 10);
+
+	if (!adv_base) {
+		fprintf(stderr, "adv_base missing in peerspec\n");
+		return 1;
+	}
+	if (inet_pton(AF_INET, adv_base, &p->adv_base.in.sin_addr) == 1) {
+		p->adv_base.in.sin_family = AF_INET;
+	} else if (inet_pton(AF_INET, adv_base, &p->adv_base.in6.sin6_addr) == 1) {
+		p->adv_base.in6.sin6_family = AF_INET6;
+	} else {
+		fprintf(stderr, "Could not parse peerspec adv_base\n");
+		return 1;
+	}
+
+	if (!adv_plen) {
+		fprintf(stderr, "adv_plen missing in peerspec\n");
+		return 1;
+	}
+	p->adv_plen = strtoul(adv_plen, NULL, 10);
+	if ((p->adv_base.in.sin_family == AF_INET && p->adv_plen > 32)
+	    || (p->adv_base.in6.sin6_family == AF_INET6 && p->adv_plen > 128)) {
+		fprintf(stderr, "Peerspec prefixlen is invalid.\n");
+		return 1;
+	}
+
+	if (!adv_step) {
+		fprintf(stderr, "adv_step missing in peerspec\n");
+		return 1;
+	}
+	if ((p->adv_base.in.sin_family == AF_INET
+	     && inet_pton(AF_INET, adv_step, &p->adv_step.in.sin_addr) != 1)
+	    || (p->adv_base.in6.sin6_family == AF_INET6
+	        && inet_pton(AF_INET6, adv_step, &p->adv_step.in6.sin6_addr) != 1)) {
+		fprintf(stderr, "Peerspec adv_step is invalid.\n");
+		return 1;
+	}
+
+	if (!adv_count) {
+		fprintf(stderr, "adv_count missing in peerspec\n");
+		return 1;
+	}
+	p->adv_count = strtoul(adv_count, NULL, 10);
+	p->updates_total = p->adv_count;
+
+	int rv = peer_connect(p);
+	if (rv)
+		return rv;
+
+	ppeers = &((*ppeers = p)->next);
+	return 0;
 }
 
 int main(int argc, char **argv)
@@ -603,8 +672,8 @@ int main(int argc, char **argv)
 		}
 	} while (optch != -1);
 
-	if (!inpfile) {
-		fprintf(stderr, "specify input file with -i\n");
+	if (!inpfile && !peers) {
+		fprintf(stderr, "specify input file with -i or synth peer with -s\n");
 		return 1;
 	}
 	if (!dhost) {
