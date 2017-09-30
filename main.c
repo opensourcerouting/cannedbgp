@@ -101,6 +101,7 @@ struct peer {
 	unsigned int adv_plen;
 	union sockaddr_container adv_step;
 	size_t adv_count;
+	size_t adv_iter;
 };
 
 static struct peer *peers = NULL, **ppeers = &peers;
@@ -175,7 +176,41 @@ static struct update *peer_synth_update(struct peer *p)
 		memcpy(&u->prefix.in6, &p->adv_base.in6.sin6_addr, sizeof(u->prefix.in6));
 	}
 
-	/* TODO: Add nexthop and as path and possibly more as attributes */
+	if (u->afi == AFI_IP6) {
+		/* TODO: MP-BGP synth not implemented yet */
+		return NULL;
+	}
+
+	/* Attributes:
+	 * 8bit  attr. flags, 0x40 (transitive, well known)
+	 * 8bit  attr. type,  0x01 (ORIGIN)
+	 * 8bit  attr. len,      1 (len of attr)
+	 * 8bit  attr. value,    0 (ORIGIN IGP)
+	 * 8bit  attr. flags, 0x40 (transitive, well known)
+	 * 8bit  attr. type,  0x02 (AS_PATH)
+	 * 8bit  attr. len,      6 (len of attr)
+	 *       attr. value:
+	 *       8bit  type:     2 (AS_SEQUENCE)
+	 *       8bit  len :     1 (1 AS)
+	 *      32bit  val :   xxx (AS)
+	 * 8bit  attr. flags, 0x40 (transitive, well known)
+	 * 8bit  attr. type,  0x03 (NEXT_HOP)
+	 * 8bit  attr. len,      4 (len of attr)
+	 *       attr. value:  xxx (IP)
+	 */
+
+
+	uint8_t attributes[] = { 0x40, 0x01, 1, 0,
+	                         0x40, 0x02, 6, 2, 1, 0xff, 0xff, 0xff, 0xff,
+	                         0x40, 0x03, 4, 0xff, 0xff, 0xff, 0xff };
+
+	uint32_t attr_as = htonl(p->asn);
+	memcpy(&attributes[9], &attr_as, sizeof(attr_as));
+	memcpy(&attributes[16], &p->bind.in.sin_addr, sizeof(p->bind.in.sin_addr));
+
+	u->attr = malloc(sizeof(attributes));
+	memcpy(u->attr, attributes, sizeof(attributes));
+	u->attrlen = sizeof(attributes);
 
 	return u;
 }
@@ -190,7 +225,16 @@ static struct update *peer_first_sendpos(struct peer *p)
 
 static struct update *peer_synth_update_iter(struct peer *p)
 {
-	/* TODO: implement step */
+	p->adv_iter++;
+
+	if (p->adv_iter == p->adv_count) {
+		free(p->sendpos->attr);
+		free(p->sendpos);
+		return NULL;
+	}
+
+	p->sendpos->prefix.in.s_addr = htonl(ntohl(p->sendpos->prefix.in.s_addr)
+	                                   + ntohl(p->adv_step.in.sin_addr.s_addr));
 	return p->sendpos;
 }
 
@@ -233,7 +277,8 @@ static void peer_ev_write(struct bufferevent *bev, void *ctx)
 	 */
 	if (p->sendpos->afi == AFI_IP) {
 		while (p->sendpos && p->sendpos->attrlen == attrsize
-		       && !memcmp(p->sendpos->attr, attrbuf, attrsize)) {
+		       && !memcmp(p->sendpos->attr, attrbuf, attrsize)
+		       && evbuffer_get_length(out) < 4096 - 19 - (p->sendpos->prefixlen + 7) / 8) {
 			if (p->sendpos->afi != AFI_IP)
 			  break;
 			prefixbytes = (p->sendpos->prefixlen + 7) / 8;
